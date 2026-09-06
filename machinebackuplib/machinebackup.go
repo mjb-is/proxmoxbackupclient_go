@@ -361,7 +361,7 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 	// Track progress for each device
 	currentProcessedSize := uint64(0)
 	
-	for _, dev := range cfg.BackupDevices {
+	for i, dev := range cfg.BackupDevices {
 		if strings.HasPrefix(dev, "\\\\.\\PhysicalDrive") {
 			re := regexp.MustCompile(`PhysicalDrive(\d+)$`)
 			matches := re.FindStringSubmatch(dev)
@@ -386,21 +386,34 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 				}
 			}
 		} else {
-			err := BackupFileDevice(client, dev, progressCallback)
+			// On Linux a whole block device (e.g. /dev/sda) is backed up as a
+			// consistent, stitched full-disk image (partition table + every
+			// partition, mounted ones snapshotted). Anything else falls back
+			// to a plain raw read of the device/file.
+			handled, size, err := backupWholeDisk(client, dev, i)
 			if err != nil {
-				return nil, fmt.Errorf("backup device %s %v", dev, err)
+				return nil, fmt.Errorf("backup device %s: %v", dev, err)
 			}
-			
-			// For file devices, get the file size to update progress
-			info, err := os.Stat(dev)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get file size for %s: %v", dev, err)
+			if handled {
+				disks = append(disks, BackupDisk{
+					Index: i,
+					Size:  size,
+				})
+			} else if err := BackupFileDevice(client, dev, progressCallback); err != nil {
+				return nil, fmt.Errorf("backup device %s: %v", dev, err)
 			}
-			
-			currentProcessedSize += uint64(info.Size())
+
+			// Update progress: the whole-disk size when handled, otherwise the file size
+			processed := int64(0)
+			if handled {
+				processed = size
+			} else if info, err := os.Stat(dev); err == nil {
+				processed = info.Size()
+			}
+			currentProcessedSize += uint64(processed)
 			if progressCallback != nil && totalSize > 0 {
 				percentage := float64(currentProcessedSize) / float64(totalSize) * 100
-				if progressCallback(percentage, fmt.Sprintf("Backup complete for file %s", dev)) {
+				if progressCallback(percentage, fmt.Sprintf("Backup complete for device %s", dev)) {
 					return nil, fmt.Errorf("backup cancelled by user")
 				}
 			}

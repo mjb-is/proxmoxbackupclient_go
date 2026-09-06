@@ -1109,7 +1109,7 @@ func backupDirectory(client *pbscommon.PBSClient, newchunk, reusechunk, failedch
 
 	if usevss {
 		var bytesArchived uint64
-		err := snapshot.CreateVSSSnapshot([]string{backupdir}, func(snaps map[string]snapshot.SnapShot) error {
+		err := snapshot.CreateVSSSnapshot([]string{backupdir}, true, func(snaps map[string]snapshot.SnapShot) error {
 			for _, snap := range snaps {
 				backupdir = snap.FullPath
 				break

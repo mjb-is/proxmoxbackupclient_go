@@ -70,7 +70,7 @@ func getAppDataFolder() (string, error) {
 	return appDataFolder, nil
 }
 
-func CreateVSSSnapshot(paths []string, backup_callback func(sn map[string]SnapShot) error) error {
+func CreateVSSSnapshot(paths []string, needFiles bool, backup_callback func(sn map[string]SnapShot) error) error {
 
 	// One Snapshotter per volume: go-vss rejects reuse of a single Snapshotter
 	// for a second volume ("snapshotter is already in use"), which made every

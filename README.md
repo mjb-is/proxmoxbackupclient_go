@@ -1,4 +1,4 @@
-# Proxmox Backup Client — Windows client for Proxmox Backup Server
+# Proxmox Backup Client — Windows and Linux client for Proxmox Backup Server
 
 [🇬🇧 English](README.md) · [🇫🇷 Français](README.fr.md) · [🇮🇹 Italiano](README.it.md) · [🇩🇪 Deutsch](README.de.md) · [🇪🇸 Español](README.es.md) · [🇷🇺 Русский](README.ru.md) · [🇨🇳 中文](README.zh.md) · [🇯🇵 日本語](README.ja.md) · [🇬🇷 Ελληνικά](README.el.md) · [🇷🇴 Română](README.ro.md) · [🇸🇪 Svenska](README.sv.md) · [🇸🇦 العربية](README.ar.md) · [🇮🇷 فارسی](README.fa.md)
 
@@ -10,9 +10,10 @@
 
 It is a **suite of tools** for backing up to PBS:
 
-- **Proxmox Backup Client GUI** (based on the Nimbus Backup GUI from RDEM Systems) — modern graphical interface for backing up Windows servers and workstations to PBS: consistent VSS snapshots, scheduled jobs, file and disk modes, snapshot browsing/restoration, multi-PBS support and a Windows service mode.
+- **Proxmox Backup Client GUI** (based on the Nimbus Backup GUI from RDEM Systems) — modern graphical interface for backing up Windows and Linux servers and workstations to PBS: consistent VSS snapshots, scheduled jobs, file and disk modes, snapshot browsing/restoration, multi-PBS support and a Windows service mode.
 - **`proxmoxbackup-directory`** — command-line tool for directory (PXAR) backups with deduplication.
-- **`proxmoxbackup-machine`** — command-line tool for full live Windows machine backups (FIDX, VSS, incremental).
+- **`proxmoxbackup-machine`** — command-line tool for full live machine backups (FIDX, VSS, incremental).
+- **Linux machine backup** (`machinebackup` binary): live-consistent whole-disk image of a running Linux host (bootable, raw, FIDX). Mounted partitions are snapshotted point-in-time with the elastio-snap/dattobd kernel module.
 - **`proxmoxbackup-nbd`** — NBD server for restoring disk backups (Linux).
 
 > Keywords: proxmox backup client windows · PBS client · Windows VSS backup · immutable offsite backups · Proxmox Backup Server interface.
@@ -99,7 +100,7 @@ When backing up an entire drive (e.g. `D:\`), the GUI automatically excludes:
 
 ## NEW! — Full machine live backup
 
-New functionality has been added that now allows backing up a complete Windows 10/11 system and their respective server versions without any downtime.
+New functionality has been added that now allows backing up a complete Windows 10/11 system, or Linux machine, and their respective server versions without any downtime.
 
 The command syntax is mostly the same, except `-backupdir string`.
 
