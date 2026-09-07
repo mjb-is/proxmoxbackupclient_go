@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -23,11 +24,18 @@ import (
 	"github.com/google/uuid"
 )
 
-// ProgressCallback function type for reporting progress
-// Return true to cancel the backup operation
+// ProgressCallback function type for reporting progress.
+// percentage is the fraction of the WHOLE job completed so far (0.0 - 1.0),
+// not of a single device, so multi-disk jobs show one continuous bar.
+// Return true to cancel the backup operation.
 type ProgressCallback func(percentage float64, message string) bool
 
 
+
+var (
+	errCancelled     = errors.New("backup cancelled by user")
+	errUploadAborted = errors.New("upload aborted")
+)
 
 var defaultMailSubjectTemplate = "Backup {{.Status}}"
 var defaultMailBodyTemplate = `{{if .Success}}Backup complete ({{.FromattedDuration}})
@@ -89,7 +97,13 @@ func BytesToString(b int64) string {
 
 }
 
-func uploadWorker(client *pbscommon.PBSClient, filename string, total_size uint64, ch chan []byte) error {
+// uploadWorker streams fixed-size chunks from ch into a PBS fixed index and
+// commits it (assign + close) when all data has been processed. readErrCh,
+// when non-nil, carries the reader's terminal error (buffered, exactly one
+// send): a reader failure or user cancellation makes uploadWorker abort
+// WITHOUT committing the index, so a cancelled/partial run never ends up as a
+// "complete" backup on the server.
+func uploadWorker(client *pbscommon.PBSClient, filename string, total_size uint64, ch chan []byte, readErrCh <-chan error) error {
 	var newchunk *atomic.Uint64 = new(atomic.Uint64)
 	var reusechunk *atomic.Uint64 = new(atomic.Uint64)
 	knownChunks := haxmap.New[string, bool]()
@@ -194,6 +208,18 @@ fmt.Printf("Chunk %d/%d/%d - Progress: %.2f%%\n", CS.chunkcount, int(math.Ceil(f
 		}
 	}
 
+	// The reader reported an error (or the user cancelled): the data in this
+	// fixed index is partial, so leave it unclosed instead of committing it.
+	if readErrCh != nil {
+		select {
+		case rerr := <-readErrCh:
+			if rerr != nil {
+				return rerr
+			}
+		default:
+		}
+	}
+
 	//Avoid incurring in request entity too large by chunking assignment PUT requests in blocks of at most 128 chunks
 	for k := 0; k < len(CS.assignments); k += 128 {
 		k2 := k + 128
@@ -262,8 +288,10 @@ func BackupFileDevice(client *pbscommon.PBSClient, filename string, progressCall
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(ch)
+		var rerr error
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			errCh <- fmt.Errorf("failed to seek to start: %w", err)
+			rerr = fmt.Errorf("failed to seek to start: %w", err)
+			errCh <- rerr
 			return
 		}
 		for {
@@ -272,19 +300,26 @@ func BackupFileDevice(client *pbscommon.PBSClient, filename string, progressCall
 			if err == io.EOF {
 				break
 			} else if err != nil {
-				errCh <- fmt.Errorf("failed to read block: %w", err)
-				return
+				rerr = fmt.Errorf("failed to read block: %w", err)
+				break
 			}
 
 			ch <- block[:nread]
 			totread = totread + int64(nread)
-			progressCallback((float64(totread)/float64(size)), fmt.Sprintf("%s: Block %d", filename, b))
+			// Returning true stops the backup (user pressed Stop).
+			if progressCallback != nil &&
+				progressCallback((float64(totread)/float64(size)), fmt.Sprintf("%s: Block %d", filename, b)) {
+				rerr = fmt.Errorf("backup cancelled by user")
+				break
+			}
 			b++
 		}
-		errCh <- nil
+		if rerr == nil {
+			errCh <- nil
+		}
 	}()
 
-	uploadErr := uploadWorker(client, slug+".fidx", uint64(size), ch)
+	uploadErr := uploadWorker(client, slug+".fidx", uint64(size), ch, errCh)
 	readErr := <-errCh
 	if readErr != nil {
 		return readErr
@@ -316,6 +351,8 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 		Secret:          cfg.Secret,
 		Username:        cfg.PBSUsername,
 		Password:        cfg.PBSPassword,
+		Ticket:          cfg.Ticket,
+		CSRFToken:       cfg.CSRFToken,
 		Datastore:       cfg.Datastore,
 		Namespace:       cfg.Namespace,
 		Insecure:        cfg.CertFingerprint != "",
@@ -323,10 +360,15 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 			BackupID: cfg.BackupID,
 		},
 	}
-	if client.Username != "" {
+	// A pre-obtained session ticket (GUI login) wins; otherwise exchange
+	// username/password for one.
+	if client.Ticket == "" && client.Username != "" {
 		if err := client.ObtainTicket(); err != nil {
 			return nil, fmt.Errorf("ticket login failed: %w", err)
 		}
+	}
+	if progressCallback != nil {
+		progressCallback(0, "Connecting to Proxmox Backup Server...")
 	}
 
 	//Physical drive paths will be like  "\\\\.\\PhysicalDrive0"
@@ -335,7 +377,8 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 
 	// Calculate total size of all disks
 	var totalSize uint64 = 0
-	for _, dev := range cfg.BackupDevices {
+	sizes := make([]uint64, len(cfg.BackupDevices))
+	for i, dev := range cfg.BackupDevices {
 		if strings.HasPrefix(dev, "\\\\.\\PhysicalDrive") {
 			// For physical drives, get the disk size
 			re := regexp.MustCompile(`PhysicalDrive(\d+)$`)
@@ -347,6 +390,7 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 			if err != nil {
 				return nil, fmt.Errorf("failed to get disk size for %s: %v", dev, err)
 			}
+			sizes[i] = uint64(size)
 			totalSize += uint64(size)
 		} else {
 			// For file devices, get file size
@@ -354,6 +398,7 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 			if err != nil {
 				return nil, fmt.Errorf("failed to get file size for %s: %v", dev, err)
 			}
+			sizes[i] = uint64(info.Size())
 			totalSize += uint64(info.Size())
 		}
 	}
@@ -362,12 +407,23 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 	currentProcessedSize := uint64(0)
 	
 	for i, dev := range cfg.BackupDevices {
+		// Wrap the job-wide callback so a device can keep reporting its own
+		// 0..1 read fraction and it maps to the fraction of the whole job.
+		baseSize := currentProcessedSize
+		devSize := sizes[i]
+		deviceCallback := func(fraction float64, message string) bool {
+			if progressCallback == nil {
+				return false
+			}
+			whole := (float64(baseSize) + fraction*float64(devSize)) / float64(totalSize)
+			return progressCallback(whole, message)
+		}
 		if strings.HasPrefix(dev, "\\\\.\\PhysicalDrive") {
 			re := regexp.MustCompile(`PhysicalDrive(\d+)$`)
 			matches := re.FindStringSubmatch(dev)
 			idx, _ := strconv.ParseInt(matches[1], 10, 32)
 			
-			size, err := BackupWindowsDisk(client, int(idx), progressCallback)
+			size, err := BackupWindowsDisk(client, int(idx), deviceCallback)
 			if err != nil {
 				return nil, fmt.Errorf("backup disk %s %v", dev, err)
 			}
@@ -380,7 +436,7 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 			// Update progress for this disk
 			currentProcessedSize += uint64(size)
 			if progressCallback != nil && totalSize > 0 {
-				percentage := float64(currentProcessedSize) / float64(totalSize) * 100
+				percentage := float64(currentProcessedSize) / float64(totalSize)
 				if progressCallback(percentage, fmt.Sprintf("Backup complete for disk %s", dev)) {
 					return nil, fmt.Errorf("backup cancelled by user")
 				}
@@ -390,7 +446,7 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 			// consistent, stitched full-disk image (partition table + every
 			// partition, mounted ones snapshotted). Anything else falls back
 			// to a plain raw read of the device/file.
-			handled, size, err := backupWholeDisk(client, dev, i)
+			handled, size, err := backupWholeDisk(client, dev, i, deviceCallback)
 			if err != nil {
 				return nil, fmt.Errorf("backup device %s: %v", dev, err)
 			}
@@ -399,7 +455,7 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 					Index: i,
 					Size:  size,
 				})
-			} else if err := BackupFileDevice(client, dev, progressCallback); err != nil {
+			} else if err := BackupFileDevice(client, dev, deviceCallback); err != nil {
 				return nil, fmt.Errorf("backup device %s: %v", dev, err)
 			}
 
@@ -412,7 +468,7 @@ func Backup(cfg *Config, progressCallback ProgressCallback) (*BackupResult, erro
 			}
 			currentProcessedSize += uint64(processed)
 			if progressCallback != nil && totalSize > 0 {
-				percentage := float64(currentProcessedSize) / float64(totalSize) * 100
+				percentage := float64(currentProcessedSize) / float64(totalSize)
 				if progressCallback(percentage, fmt.Sprintf("Backup complete for device %s", dev)) {
 					return nil, fmt.Errorf("backup cancelled by user")
 				}

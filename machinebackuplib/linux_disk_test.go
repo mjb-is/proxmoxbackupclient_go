@@ -167,7 +167,12 @@ func TestWriteSegmentsByteExact(t *testing.T) {
 
 	ch := make(chan []byte)
 	errc := make(chan error, 1)
-	go func() { errc <- writeSegments(diskPath, segments, ch) }()
+	uploadDone := make(chan struct{})
+	go func() {
+		err := writeSegments(diskPath, segments, total, ch, uploadDone, nil)
+		close(ch)
+		errc <- err
+	}()
 
 	got := make([]byte, 0, total)
 	var chunkCount int
@@ -209,9 +214,9 @@ func TestResilientCopyBadSectors(t *testing.T) {
 	src := &faultyReaderAt{data: data, bad: badSet}
 
 	var out []byte
-	emit := func(b []byte) { out = append(out, b...) }
+	emit := func(b []byte) bool { out = append(out, b...); return true }
 	zeroBlk := make([]byte, sectorSize)
-	emitZeros := func(n uint64) {
+	emitZeros := func(n uint64) bool {
 		for n > 0 {
 			m := uint64(len(zeroBlk))
 			if m > n {
@@ -220,10 +225,14 @@ func TestResilientCopyBadSectors(t *testing.T) {
 			out = append(out, zeroBlk[:m]...)
 			n -= m
 		}
+		return true
 	}
 
 	block := make([]byte, pbscommon.PBS_FIXED_CHUNK_SIZE)
-	bad := resilientCopy(src, 0, length, block, emit, emitZeros)
+	bad, ok := resilientCopy(src, 0, length, block, emit, emitZeros)
+	if !ok {
+		t.Fatal("resilientCopy reported failure")
+	}
 
 	if bad != 2 {
 		t.Fatalf("bad sector count = %d, want 2", bad)

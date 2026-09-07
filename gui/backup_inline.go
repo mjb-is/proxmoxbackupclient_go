@@ -1047,20 +1047,23 @@ func runMachineBackupInline(opts BackupOptions) error {
 		CertFingerprint: opts.CertFingerprint,
 		AuthID:          opts.AuthID,
 		Secret:          opts.Secret,
+		Ticket:          opts.Ticket,
+		CSRFToken:       opts.CSRFToken,
 		Datastore:       opts.Datastore,
 		Namespace:       opts.Namespace,
 		BackupID:        opts.BackupID,
 		BackupType:      opts.BackupType,
 		BackupDevices:   opts.BackupObjects,
 	}
-	
-	// Progress callback wrapper
+
+	// Progress callback wrapper. Returning true (user pressed Stop, which
+	// cancels opts.Ctx) makes the backup abort without committing the index.
 	progress := func(pct float64, msg string) bool {
 		writeBackupLog(fmt.Sprintf("Backup progress: %.1f%% - %s", pct*100, msg))
 		if opts.OnProgress != nil {
 			opts.OnProgress(pct, msg)
 		}
-		return false
+		return opts.Ctx != nil && opts.Ctx.Err() != nil
 	}
 	
 	// Perform machine backup

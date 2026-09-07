@@ -125,7 +125,7 @@ func isBlockDevice(path string) bool {
 	return fi.Mode()&os.ModeDevice != 0 && fi.Mode()&os.ModeCharDevice == 0
 }
 
-func backupWholeDisk(client *pbscommon.PBSClient, dev string, index int) (bool, int64, error) {
+func backupWholeDisk(client *pbscommon.PBSClient, dev string, index int, progressCallback ProgressCallback) (bool, int64, error) {
 	if !strings.HasPrefix(dev, "/dev/") {
 		return false, 0, nil
 	}
@@ -163,7 +163,7 @@ func backupWholeDisk(client *pbscommon.PBSClient, dev string, index int) (bool, 
 	fidxName := fmt.Sprintf("drive-sata%d.img.fidx", index)
 
 	err = snapshot.CreateVSSSnapshot(mountpoints, false, func(snapshots map[string]snapshot.SnapShot) error {
-		return streamStitchedDisk(client, dev, fidxName, uint64(total), parts, snapshots)
+		return streamStitchedDisk(client, dev, fidxName, uint64(total), parts, snapshots, progressCallback)
 	})
 	if err != nil {
 		return true, 0, err
@@ -177,7 +177,7 @@ type diskSegment struct {
 	snapDev string
 }
 
-func streamStitchedDisk(client *pbscommon.PBSClient, dev, fidxName string, total uint64, parts []diskPartition, snapshots map[string]snapshot.SnapShot) error {
+func streamStitchedDisk(client *pbscommon.PBSClient, dev, fidxName string, total uint64, parts []diskPartition, snapshots map[string]snapshot.SnapShot, progressCallback ProgressCallback) error {
 	regions := make([]diskSegment, 0)
 	for _, p := range parts {
 		if p.mountpoint == "" {
@@ -200,14 +200,27 @@ func streamStitchedDisk(client *pbscommon.PBSClient, dev, fidxName string, total
 	segments := assembleSegments(total, regions)
 
 	ch := make(chan []byte)
-	go func() {
-		if err := writeSegments(dev, segments, ch); err != nil {
+	errCh := make(chan error, 1)
+	uploadDone := make(chan struct{})
 
-			panic(err)
-		}
+	go func() {
+		err := writeSegments(dev, segments, total, ch, uploadDone, progressCallback)
+		close(ch)
+		errCh <- err
 	}()
 
-	return uploadWorker(client, fidxName, total, ch)
+	var uploadErr error
+	go func() {
+		defer close(uploadDone)
+		uploadErr = uploadWorker(client, fidxName, total, ch, errCh)
+	}()
+
+	readErr := <-errCh
+	<-uploadDone
+	if uploadErr != nil {
+		return uploadErr
+	}
+	return readErr
 }
 
 func assembleSegments(total uint64, regions []diskSegment) []diskSegment {
@@ -234,30 +247,61 @@ func assembleSegments(total uint64, regions []diskSegment) []diskSegment {
 	return segments
 }
 
-func writeSegments(dev string, segments []diskSegment, ch chan []byte) (retErr error) {
-	defer close(ch)
-
+func writeSegments(dev string, segments []diskSegment, total uint64, ch chan []byte, uploadDone <-chan struct{}, progressCallback ProgressCallback) (retErr error) {
 	buffer := make([]byte, 0, pbscommon.PBS_FIXED_CHUNK_SIZE*2)
 
-	emit := func(data []byte) {
+	var pos uint64 = 0
+	var b int64 = 0
+
+	report := func() bool {
+		if progressCallback == nil {
+			return false
+		}
+		return progressCallback(float64(pos)/float64(total), fmt.Sprintf("%s: Block %d", dev, b))
+	}
+
+	sendChunk := func(chunk []byte) bool {
+		if len(chunk) == 0 {
+			return true
+		}
+		select {
+		case ch <- chunk:
+		case <-uploadDone:
+			return false // uploader stopped; drop the data
+		}
+		pos += uint64(len(chunk))
+		b++
+		return true
+	}
+
+	emit := func(data []byte) bool {
 		buffer = append(buffer, data...)
 		for len(buffer) >= pbscommon.PBS_FIXED_CHUNK_SIZE {
 			chunk := make([]byte, pbscommon.PBS_FIXED_CHUNK_SIZE)
 			copy(chunk, buffer[:pbscommon.PBS_FIXED_CHUNK_SIZE])
-			ch <- chunk
+			if !sendChunk(chunk) {
+				return false
+			}
 			buffer = buffer[pbscommon.PBS_FIXED_CHUNK_SIZE:]
 		}
+		if report() {
+			return false // cancelled by user
+		}
+		return true
 	}
 	zeroBlk := make([]byte, pbscommon.PBS_FIXED_CHUNK_SIZE)
-	emitZeros := func(n uint64) {
+	emitZeros := func(n uint64) bool {
 		for n > 0 {
 			m := len(zeroBlk)
 			if uint64(m) > n {
 				m = int(n)
 			}
-			emit(zeroBlk[:m])
+			if !emit(zeroBlk[:m]) {
+				return false
+			}
 			n -= uint64(m)
 		}
+		return true
 	}
 
 	disk, err := os.Open(dev)
@@ -270,8 +314,9 @@ func writeSegments(dev string, segments []diskSegment, ch chan []byte) (retErr e
 	for _, seg := range segments {
 		length := seg.end - seg.start
 		var bad uint64
+		var ok bool
 		if seg.snapDev == "" {
-			bad = resilientCopy(disk, seg.start, length, block, emit, emitZeros)
+			bad, ok = resilientCopy(disk, seg.start, length, block, emit, emitZeros)
 			if bad > 0 {
 				log.Printf("\033[31;1mWarning: %s had %d unreadable sector(s) (~%s), zero-filled in the image\033[0m",
 					dev, bad, BytesToString(int64(bad*sectorSize)))
@@ -281,12 +326,15 @@ func writeSegments(dev string, segments []diskSegment, ch chan []byte) (retErr e
 			if err != nil {
 				return err
 			}
-			bad = resilientCopy(sf, 0, length, block, emit, emitZeros)
+			bad, ok = resilientCopy(sf, 0, length, block, emit, emitZeros)
 			sf.Close()
 			if bad > 0 {
 				log.Printf("\033[31;1mWarning: snapshot %s had %d unreadable sector(s) (~%s), zero-filled in the image\033[0m",
 					seg.snapDev, bad, BytesToString(int64(bad*sectorSize)))
 			}
+		}
+		if !ok {
+			return errCancelled
 		}
 	}
 
@@ -297,13 +345,15 @@ func writeSegments(dev string, segments []diskSegment, ch chan []byte) (retErr e
 		}
 		chunk := make([]byte, n)
 		copy(chunk, buffer[:n])
-		ch <- chunk
+		if !sendChunk(chunk) {
+			return errCancelled
+		}
 		buffer = buffer[n:]
 	}
 	return nil
 }
 
-func resilientCopy(src io.ReaderAt, srcOffset, length uint64, block []byte, emit func([]byte), emitZeros func(uint64)) uint64 {
+func resilientCopy(src io.ReaderAt, srcOffset, length uint64, block []byte, emit func([]byte) bool, emitZeros func(uint64) bool) (uint64, bool) {
 	var badSectors uint64
 	var pos uint64
 	for pos < length {
@@ -313,7 +363,9 @@ func resilientCopy(src io.ReaderAt, srcOffset, length uint64, block []byte, emit
 		}
 		n, err := src.ReadAt(block[:want], int64(srcOffset+pos))
 		if n > 0 {
-			emit(block[:n])
+			if !emit(block[:n]) {
+				return badSectors, false
+			}
 			pos += uint64(n)
 		}
 		if err == nil {
@@ -321,7 +373,9 @@ func resilientCopy(src io.ReaderAt, srcOffset, length uint64, block []byte, emit
 		}
 		if err == io.EOF {
 			if pos < length {
-				emitZeros(length - pos)
+				if !emitZeros(length - pos) {
+					return badSectors, false
+				}
 				pos = length
 			}
 			break
@@ -335,7 +389,9 @@ func resilientCopy(src io.ReaderAt, srcOffset, length uint64, block []byte, emit
 			}
 			m, serr := src.ReadAt(block[:s], int64(srcOffset+pos))
 			if m > 0 {
-				emit(block[:m])
+				if !emit(block[:m]) {
+					return badSectors, false
+				}
 				pos += uint64(m)
 			}
 			if serr == nil {
@@ -343,18 +399,22 @@ func resilientCopy(src io.ReaderAt, srcOffset, length uint64, block []byte, emit
 			}
 			if serr == io.EOF {
 				if pos < length {
-					emitZeros(length - pos)
+					if !emitZeros(length - pos) {
+						return badSectors, false
+					}
 					pos = length
 				}
 				winEnd = pos
 				break
 			}
 			if rem := s - uint64(m); rem > 0 {
-				emitZeros(rem)
+				if !emitZeros(rem) {
+					return badSectors, false
+				}
 				pos += rem
 				badSectors++
 			}
 		}
 	}
-	return badSectors
+	return badSectors, true
 }

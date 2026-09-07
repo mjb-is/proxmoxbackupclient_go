@@ -28,6 +28,8 @@ type Config struct {
 	Secret          string      `json:"secret"`
 	PBSUsername     string      `json:"pbs-username"`
 	PBSPassword     string      `json:"pbs-password"`
+	Ticket          string      `json:"ticket"`
+	CSRFToken       string      `json:"csrf-token"`
 	Datastore       string      `json:"datastore"`
 	Namespace       string      `json:"namespace"`
 	BackupID        string      `json:"backup-id"`
@@ -38,9 +40,10 @@ type Config struct {
 }
 
 func (c *Config) Valid() bool {
-	// Authentication is either an API token (authid+secret) or a PBS
-	// username+password (ticket login). Exactly one of the two must be set.
-	authOK := (c.AuthID != "" && c.Secret != "") || (c.PBSUsername != "" && c.PBSPassword != "")
+	// Authentication is an API token (authid+secret), a PBS username
+	// (ticket login; the password may be omitted and is then asked for
+	// interactively by the CLI), or a pre-obtained session ticket.
+	authOK := (c.AuthID != "" && c.Secret != "") || c.PBSUsername != "" || c.Ticket != ""
 	baseValid := c.BaseURL != "" && authOK && c.Datastore != "" && len(c.BackupDevices) > 0
 	if !baseValid {
 		return baseValid
