@@ -194,6 +194,23 @@ func main() {
 		}
 		os.Exit(1)
 	}
+
+	// Without -certfingerprint, fetch the fingerprint the server presents and
+	// ask the user to confirm it before pinning.
+	fingerprint, err := clientcommon.ConfirmFingerprint(cfg.BaseURL, cfg.CertFingerprint)
+	if err != nil {
+		fatalError("certificate fingerprint confirmation", err)
+	}
+	cfg.CertFingerprint = fingerprint
+
+	// Ticket login without -pbspassword: ask for it on the console.
+	if cfg.PBSUsername != "" && cfg.PBSPassword == "" {
+		cfg.PBSPassword, err = clientcommon.PromptPassword(fmt.Sprintf("Password for %s: ", cfg.PBSUsername))
+		if err != nil {
+			fatalError("reading PBS password", err)
+		}
+	}
+
 	L := clientcommon.Locking{}
 
 	lock_ok := L.AcquireProcessLock()

@@ -17,13 +17,14 @@ require (
 	github.com/st-matskevich/go-vss v0.3.3 // indirect
 	golang.org/x/exp v0.0.0-20240531132922-fd00a4e0eefc // indirect
 	golang.org/x/net v0.23.0 // indirect
+	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.15.0 // indirect
 )
 
 require (
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/tawesoft/golib/v2 v2.16.0
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.37.0 // indirect
 )
 
 // Local package replacements

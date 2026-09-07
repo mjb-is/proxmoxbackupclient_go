@@ -46,8 +46,9 @@ type Config struct {
 
 func (c *Config) valid() bool {
 	// Authentication is either an API token (authid+secret) or a PBS
-	// username+password (ticket login). Exactly one of the two must be set.
-	authOK := (c.AuthID != "" && c.Secret != "") || (c.PBSUsername != "" && c.PBSPassword != "")
+	// username (ticket login). The ticket password may be omitted: in that
+	// case the CLI asks for it interactively before connecting.
+	authOK := (c.AuthID != "" && c.Secret != "") || c.PBSUsername != ""
 	baseValid := c.BaseURL != "" && authOK && c.Datastore != "" && (c.BackupSourceDir != "" || c.BackupStreamName != "")
 	if !baseValid {
 		return baseValid
