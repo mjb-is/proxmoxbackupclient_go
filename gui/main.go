@@ -250,8 +250,15 @@ func (a *App) domReady(ctx context.Context) {
 	writeDebugLog("App.domReady() called - UI loaded successfully")
 }
 
-// beforeClose is called when the application is about to quit
+// beforeClose is called when the application is about to quit.
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
+	// Only Windows has a tray that keeps the app alive, so only there do we
+	// swallow the close and hide the window. On other platforms the tray is a
+	// no-op, so we must let the window close or the app can never be quit.
+	if !a.preventCloseToTray() {
+		writeDebugLog("App.beforeClose() called - allowing close (no tray on this platform)")
+		return false
+	}
 	writeDebugLog("App.beforeClose() called - minimizing to tray")
 	// Instead of closing, minimize to tray
 	a.MinimizeToTray()

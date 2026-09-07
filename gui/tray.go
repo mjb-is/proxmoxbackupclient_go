@@ -17,6 +17,13 @@ var (
 	menuQuit        *systray.MenuItem
 )
 
+// preventCloseToTray reports whether closing the main window should be
+// intercepted and turned into a hide-to-tray. On Windows the tray keeps the
+// app alive, so we swallow the close.
+func (a *App) preventCloseToTray() bool {
+	return true
+}
+
 // SetupSystemTray initializes the system tray icon and menu
 func (a *App) SetupSystemTray() {
 	if trayInitialized {
