@@ -6,6 +6,7 @@ package snapshot
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -195,18 +196,25 @@ func isOurCowFile(cowFile string) bool {
 	return strings.HasPrefix(base, ".pbs_snapshot_") && strings.HasSuffix(base, ".cow")
 }
 
-func destroyStaleTracers(c snapControl, device, originMount string) {
+// destroyStaleTracers removes tracers of a previous crashed run that are still
+// attached to device. Failing to do so means the device tracer state cannot be
+// trusted, so every failure is propagated to the caller.
+func destroyStaleTracers(c snapControl, device, originMount string) error {
 	if c.infoFile == "" {
-		return
+		return nil
 	}
 	data, err := os.ReadFile(c.infoFile)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s state: %w", c.infoFile, err)
 	}
 	var info snapInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		return
+		return fmt.Errorf("parsing %s state: %w", c.infoFile, err)
 	}
+	var errs []error
 	for _, d := range info.Devices {
 		if d.BlockDevice != device || !isOurCowFile(d.CowFile) {
 			continue
@@ -214,12 +222,13 @@ func destroyStaleTracers(c snapControl, device, originMount string) {
 		log.Printf("Removing stale %s snapshot %d left tracing %s by a previous run",
 			c.name, d.Minor, device)
 		if out, err := exec.Command(c.bin, "destroy", strconv.Itoa(d.Minor)).CombinedOutput(); err != nil {
-			log.Printf("Warning: could not destroy stale %s snapshot %d: %v: %s",
-				c.name, d.Minor, err, strings.TrimSpace(string(out)))
+			errs = append(errs, fmt.Errorf("could not destroy stale %s snapshot %d on %s: %v: %s",
+				c.name, d.Minor, device, err, strings.TrimSpace(string(out))))
 			continue
 		}
 		os.Remove(filepath.Join(originMount, filepath.Base(d.CowFile)))
 	}
+	return errors.Join(errs...)
 }
 
 func createOne(c snapControl, absPath string, needFiles bool) (*linuxSnapshot, string, error) {
@@ -228,7 +237,9 @@ func createOne(c snapControl, absPath string, needFiles bool) (*linuxSnapshot, s
 		return nil, "", err
 	}
 
-	destroyStaleTracers(c, device, mountpoint)
+	if err := destroyStaleTracers(c, device, mountpoint); err != nil {
+		return nil, "", err
+	}
 
 	minor, err := allocMinor(c)
 	if err != nil {
@@ -250,8 +261,7 @@ func createOne(c snapControl, absPath string, needFiles bool) (*linuxSnapshot, s
 	ls := &linuxSnapshot{control: c, minor: minor, device: snapDev, cowFile: cowFile}
 
 	if err := waitForDevice(snapDev, 5*time.Second); err != nil {
-		cleanupOne(ls)
-		return nil, "", err
+		return nil, "", errors.Join(err, cleanupOne(ls))
 	}
 
 	trackedMu.Lock()
@@ -269,13 +279,11 @@ func createOne(c snapControl, absPath string, needFiles bool) (*linuxSnapshot, s
 
 	tmpMount, err := os.MkdirTemp("", "pbs-snap-")
 	if err != nil {
-		cleanupOne(ls)
-		return nil, "", err
+		return nil, "", errors.Join(err, cleanupOne(ls))
 	}
 	if err := mountReadOnly(snapDev, tmpMount, fstype); err != nil {
 		os.Remove(tmpMount)
-		cleanupOne(ls)
-		return nil, "", err
+		return nil, "", errors.Join(err, cleanupOne(ls))
 	}
 	ls.mountpoint = tmpMount
 
@@ -313,9 +321,9 @@ func mountReadOnly(dev, target, fstype string) error {
 	return fmt.Errorf("mounting %s (%s) read-only at %s: %v", dev, fstype, target, lastErr)
 }
 
-func cleanupOne(ls *linuxSnapshot) {
+func cleanupOne(ls *linuxSnapshot) error {
 	if ls == nil {
-		return
+		return nil
 	}
 	if ls.mountpoint != "" {
 		if err := syscall.Unmount(ls.mountpoint, 0); err != nil {
@@ -325,8 +333,9 @@ func cleanupOne(ls *linuxSnapshot) {
 		os.Remove(ls.mountpoint)
 		ls.mountpoint = ""
 	}
+	var retErr error
 	if out, err := exec.Command(ls.control.bin, "destroy", strconv.Itoa(ls.minor)).CombinedOutput(); err != nil {
-		log.Printf("Warning: failed to destroy %s snapshot %d: %v: %s",
+		retErr = fmt.Errorf("failed to destroy %s snapshot %d: %v: %s",
 			ls.control.name, ls.minor, err, strings.TrimSpace(string(out)))
 	}
 	if ls.cowFile != "" {
@@ -341,9 +350,10 @@ func cleanupOne(ls *linuxSnapshot) {
 		}
 	}
 	trackedMu.Unlock()
+	return retErr
 }
 
-func CreateVSSSnapshot(paths []string, needFiles bool, backup_callback func(sn map[string]SnapShot) error) error {
+func CreateVSSSnapshot(paths []string, needFiles bool, backup_callback func(sn map[string]SnapShot) error) (retErr error) {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("consistent snapshot requires root: refusing to proceed with an inconsistent full-system snapshot")
 	}
@@ -357,7 +367,7 @@ func CreateVSSSnapshot(paths []string, needFiles bool, backup_callback func(sn m
 
 	defer func() {
 		for i := len(created) - 1; i >= 0; i-- {
-			cleanupOne(created[i])
+			retErr = errors.Join(retErr, cleanupOne(created[i]))
 		}
 	}()
 
@@ -391,8 +401,11 @@ func VSSCleanup() error {
 	copy(remaining, tracked)
 	trackedMu.Unlock()
 
+	var errs []error
 	for i := len(remaining) - 1; i >= 0; i-- {
-		cleanupOne(remaining[i])
+		if err := cleanupOne(remaining[i]); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
