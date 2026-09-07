@@ -89,7 +89,13 @@ echo "==> installing launchers and metadata"
 install -m 0755 "$SCRIPT_DIR/pbsgo-gui" "$STAGE/usr/bin/pbsgo-gui"
 install -m 0755 "$SCRIPT_DIR/pbsgo-gui-root" "$STAGE/usr/bin/pbsgo-gui-root"
 install -m 0644 "$SCRIPT_DIR/pbsgo-gui.desktop" "$STAGE/usr/share/applications/pbsgo-gui.desktop"
-install -m 0644 "$ROOT/gui/build/appicon.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/pbsgo.png"
+# Prefer the 1024px icon wails generates; fall back to the tracked
+# 256px source icon on clean checkouts where gui/build/ does not exist.
+if [ -f "$ROOT/gui/build/appicon.png" ]; then
+    install -m 0644 "$ROOT/gui/build/appicon.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/pbsgo.png"
+else
+    install -m 0644 "$ROOT/gui/Icon.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/pbsgo.png"
+fi
 
 echo "==> computing dependencies"
 NATIVE_ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
