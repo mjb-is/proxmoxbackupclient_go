@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"pbscommon"
 	"strings"
@@ -17,6 +19,34 @@ import (
 	"github.com/pojntfx/go-nbd/pkg/server"
 	"github.com/rivo/tview"
 )
+
+// requireRoot verifies the process runs with root privileges, which is needed
+// to open /dev/nbdX and load the nbd kernel module.
+func requireRoot() error {
+	if os.Geteuid() == 0 {
+		return nil
+	}
+	return errors.New("pbsnbd must be run as root: it needs to open /dev/nbdX and load the nbd kernel module")
+}
+
+// ensureNBDModule makes sure the nbd kernel module is loaded, loading it with
+// modprobe when possible.
+func ensureNBDModule() error {
+	if _, err := os.Stat("/sys/module/nbd"); err == nil {
+		return nil
+	}
+	if _, err := os.Stat("/sbin/modprobe"); err != nil {
+		return errors.New("the nbd kernel module is not loaded and modprobe was not found; load it manually (modprobe nbd)")
+	}
+	out, err := exec.Command("modprobe", "nbd").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("the nbd kernel module is not loaded and 'modprobe nbd' failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if _, err := os.Stat("/sys/module/nbd"); err != nil {
+		return errors.New("'modprobe nbd' succeeded but /sys/module/nbd is still missing; the module is likely unavailable in this kernel")
+	}
+	return nil
+}
 
 func setReadOnly(dev *os.File, readonly bool) error {
     // BLKROSET constant from <linux/fs.h>
@@ -88,9 +118,11 @@ func nbdStart(pbsclient *pbscommon.PBSClient, fidxdata []byte, nbd_index int) {
 	}
 	defer conn.Close()
 	nbddev := fmt.Sprintf("/dev/nbd%d", nbd_index)
+	if _, err := os.Stat(nbddev); err != nil {
+		panic(fmt.Errorf("%s does not exist: the nbd module provides fewer instances than requested; try a lower -nbd index or increase nbds_max", nbddev))
+	}
 	f, err := os.Open(nbddev)
 	if err != nil {
-		fmt.Println("Please do modprobe nbd")
 		panic(err)
 	}
 	defer f.Close()
@@ -139,6 +171,19 @@ func main() {
 	if *helpFlag {
 		flag.PrintDefaults()
 		return
+	}
+
+	// Mounting an NBD device requires root and the nbd kernel module; only
+	// -list runs without them.
+	if !*listFlag {
+		if err := requireRoot(); err != nil {
+			fmt.Fprintln(os.Stderr, "pbsnbd:", err)
+			os.Exit(1)
+		}
+		if err := ensureNBDModule(); err != nil {
+			fmt.Fprintln(os.Stderr, "pbsnbd:", err)
+			os.Exit(1)
+		}
 	}
 
 	if *listFlag { // Non-interactive: print available fidx images and exit
