@@ -55,6 +55,25 @@ type Config struct {
 	SMTPPassword string `json:"smtp_password,omitempty"`
 	EmailFrom    string `json:"email_from,omitempty"`
 	EmailTo      string `json:"email_to,omitempty"`
+
+	// ==================== UI PREFERENCES ====================
+	// Theme is the user's accent-color choice. Persisted here (like every
+	// other setting) rather than in the frontend's browser localStorage,
+	// which doesn't survive a WebView2 profile reset. nil means "no theme
+	// saved yet — use the built-in default (or the active brand's own
+	// accent, if one is set — see brand.go)".
+	Theme *ThemeSettings `json:"theme,omitempty"`
+}
+
+// ThemeSettings is the user's chosen accent color pair. Accent/AccentHover
+// are only meaningful when Preset == "custom" — for a built-in preset the
+// frontend already knows its colors and only needs the name, but they're
+// saved either way so a custom theme's exact values survive even if the
+// built-in preset list changes later.
+type ThemeSettings struct {
+	Preset      string `json:"preset"` // "amber" | "blue" | "green" | "red" | "dark" | "custom"
+	Accent      string `json:"accent,omitempty"`
+	AccentHover string `json:"accentHover,omitempty"`
 }
 
 // sanitized returns a copy of the config with all secrets stripped (legacy PBS

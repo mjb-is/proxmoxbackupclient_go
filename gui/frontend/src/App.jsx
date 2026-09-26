@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from './i18n/i18nContext'
 import LanguageSwitcher from './components/LanguageSwitcher'
 import MachineBackupConfig from './components/MachineBackupConfig'
+import ThemePicker, { hasStoredTheme, applyStoredTheme } from './components/ThemePicker'
 import logo from './assets/logo.webp'
 // Wails runtime imports (will be available when built with Wails)
 let GetConfigWithHostname, SaveConfig, TestConnection, StartBackup, StartMachineBackup, ListSnapshots, ListSnapshotContents, GetSnapshotMeta, RestoreSnapshot, OpenRestoreDestDialog, ListPhysicalDisks, GetVersion, EventsOn, SearchFiles, CancelSearch, CancelBackup, GetBrand, OpenBrowser
@@ -400,9 +401,21 @@ function App() {
           const b = await GetBrand()
           if (b) {
             setBrand(b)
-            const root = document.documentElement.style
-            if (b.accent) root.setProperty('--accent', b.accent)
-            if (b.accent_hover) root.setProperty('--accent-hover', b.accent_hover)
+            // A saved Theme choice always wins over the brand's own default
+            // accent — it's a later, more specific, explicit user choice —
+            // but only for the DEFAULT (unbranded) identity. A real brand's
+            // accent is a deliberate vendor choice, not a default to
+            // override: the Theme picker is hidden entirely for one (see
+            // the tab bar below), but that alone wouldn't undo a theme
+            // saved BEFORE this build was rebranded, so ignore any stored
+            // theme outright whenever a real brand is active.
+            if (b.is_default && await hasStoredTheme()) {
+              await applyStoredTheme()
+            } else {
+              const root = document.documentElement.style
+              if (b.accent) root.setProperty('--accent', b.accent)
+              if (b.accent_hover) root.setProperty('--accent-hover', b.accent_hover)
+            }
             if (b.title) document.title = version ? `${b.title} v${version}` : b.title
           }
         }
@@ -1597,6 +1610,16 @@ function App() {
           <div className={`tab ${activeTab === 'restore' ? 'active' : ''}`} onClick={() => setActiveTab('restore')}>
             {t('tabRestore')}
           </div>
+          {/* A real brand's own accent is a deliberate vendor choice, not a
+              default the user is meant to override — hide the picker
+              entirely for a branded build (brand.is_default false) rather
+              than merely disabling it, so there is no UI path to a
+              non-brand color at all. */}
+          {brand.is_default && (
+            <div className={`tab ${activeTab === 'theme' ? 'active' : ''}`} onClick={() => setActiveTab('theme')}>
+              {t('themeTitle')}
+            </div>
+          )}
           <div className={`tab ${activeTab === 'about' ? 'active' : ''}`} onClick={() => setActiveTab('about')}>
             {t('tabAbout')}
           </div>
@@ -2596,6 +2619,14 @@ function App() {
             <div className={`status ${status.type} visible`}>{status.message}</div>
           )}
         </div>
+
+        {/* Theme Tab — hidden entirely for a branded build, see the tab bar above */}
+        {brand.is_default && (
+          <div className={`tab-content ${activeTab === 'theme' ? 'active' : ''}`}>
+            <h2>{t('themeTitle')}</h2>
+            <ThemePicker />
+          </div>
+        )}
 
         {/* About Tab */}
         <div className={`tab-content ${activeTab === 'about' ? 'active' : ''}`}>
